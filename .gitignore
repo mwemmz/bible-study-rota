@@ -1,0 +1,6 @@
+node_modules/
+rota.db
+rota.db-wal
+rota.db-shm
+.env
+test-email.js

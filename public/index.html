@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bible Study Rota</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- Video background -->
+  <div class="bg-wrap">
+    <video class="bg-video" autoplay muted loop playsinline>
+      <source src="bg.mp4" type="video/mp4" />
+    </video>
+    <div class="bg-overlay"></div>
+  </div>
+
+  <header>
+    <div class="eyebrow">Schedule</div>
+    <h1>Bible Study Rota</h1>
+    <p class="subtitle">Monday – Friday Sessions</p>
+  </header>
+
+  <main>
+    <!-- Tab navigation -->
+    <nav class="tabs">
+      <button class="tab active" data-tab="rota">Rota</button>
+      <button class="tab" data-tab="members">Members</button>
+      <button class="tab" data-tab="add-session">Add Session</button>
+    </nav>
+
+    <!-- ROTA TAB -->
+    <section id="tab-rota" class="tab-content active">
+      <div class="filter-bar">
+        <label for="filter-week">Show</label>
+        <select id="filter-week">
+          <option value="all">All sessions</option>
+          <option value="this-week">This week</option>
+          <option value="next-week">Next week</option>
+          <option value="4-weeks">Next 4 weeks</option>
+        </select>
+      </div>
+      <div id="rota-list" class="rota-list"></div>
+    </section>
+
+    <!-- MEMBERS TAB -->
+    <section id="tab-members" class="tab-content">
+      <div class="member-form">
+        <div class="member-form-inner">
+          <h2>Manage Members</h2>
+          <form id="add-member-form">
+            <div>
+              <label for="member-name">Name</label>
+              <input type="text" id="member-name" placeholder="Full name" required />
+            </div>
+            <div>
+              <label for="member-email">Email</label>
+              <input type="email" id="member-email" placeholder="Email address" required />
+            </div>
+            <button type="submit" class="btn btn-primary btn-block">Add Member</button>
+          </form>
+        </div>
+      </div>
+      <div id="members-list" class="members-list"></div>
+    </section>
+
+    <!-- ADD SESSION TAB -->
+    <section id="tab-add-session" class="tab-content">
+      <div class="session-form">
+        <div class="session-form-inner">
+          <h2>Add New Session</h2>
+          <form id="add-session-form">
+            <div>
+              <label for="session-date">Date</label>
+              <input type="date" id="session-date" required />
+            </div>
+            <div>
+              <label for="session-title">Title</label>
+              <input type="text" id="session-title" value="Bible Study" />
+            </div>
+            <div>
+              <label for="session-location">Location</label>
+              <input type="text" id="session-location" placeholder="e.g. Living room, Zoom" />
+            </div>
+            <div>
+              <label for="session-notes">Notes</label>
+              <textarea id="session-notes" rows="3" placeholder="Any notes for this session"></textarea>
+            </div>
+            <button type="submit" class="btn btn-primary btn-block">Add Session</button>
+          </form>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ASSIGN MODAL -->
+  <div id="assign-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-content-inner">
+        <button class="modal-close" id="modal-close">&times;</button>
+        <h2 id="modal-title">Assign Leader</h2>
+        <p id="modal-date" class="modal-date"></p>
+
+        <form id="assign-form">
+          <input type="hidden" id="assign-session-id" />
+
+          <div>
+            <label for="assign-member">Member</label>
+            <select id="assign-member" required>
+              <option value="">Choose a member</option>
+            </select>
+          </div>
+
+          <div>
+            <label for="assign-role">Role</label>
+            <select id="assign-role">
+              <option value="Leader">Leader</option>
+              <option value="Host">Host</option>
+              <option value="Co-Lead">Co-Lead</option>
+            </select>
+          </div>
+
+          <div>
+            <label for="assign-by">Assigned by</label>
+            <input type="text" id="assign-by" placeholder="Who made this assignment" />
+          </div>
+
+          <div>
+            <label for="assign-reminder">Reminder</label>
+            <select id="assign-reminder">
+              <option value="">No reminder</option>
+              <option value="15">15 minutes before</option>
+              <option value="60">1 hour before</option>
+              <option value="180">3 hours before</option>
+              <option value="1440">1 day before</option>
+              <option value="2880">2 days before</option>
+              <option value="10080">1 week before</option>
+            </select>
+          </div>
+
+          <button type="submit" class="btn btn-primary btn-block" style="margin-top:8px">Save Assignment</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- EDIT SESSION MODAL -->
+  <div id="edit-session-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-content-inner">
+        <button class="modal-close" id="edit-modal-close">&times;</button>
+        <h2>Edit Session</h2>
+        <form id="edit-session-form">
+          <input type="hidden" id="edit-session-id" />
+          <div>
+            <label for="edit-session-date">Date</label>
+            <input type="date" id="edit-session-date" required />
+          </div>
+          <div>
+            <label for="edit-session-title">Title</label>
+            <input type="text" id="edit-session-title" />
+          </div>
+          <div>
+            <label for="edit-session-location">Location</label>
+            <input type="text" id="edit-session-location" />
+          </div>
+          <div>
+            <label for="edit-session-notes">Notes</label>
+            <textarea id="edit-session-notes" rows="3"></textarea>
+          </div>
+          <button type="submit" class="btn btn-primary btn-block" style="margin-top:8px">Save Changes</button>
+          <button type="button" class="btn btn-danger btn-block" id="delete-session-btn" style="margin-top:8px">Delete Session</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST -->
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
