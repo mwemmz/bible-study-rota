@@ -89,14 +89,17 @@ document.querySelectorAll(".tab").forEach((tab) => {
 // ---------------------------------------------------------------------------
 
 async function loadRota() {
-  const data = await api("/api/rota");
-  rotaData = data.rota;
-  membersData = data.members;
-  renderRota();
-  renderMembers();
-  populateMemberSelect();
-  // Re-observe new elements for scroll reveal
-  requestAnimationFrame(setupScrollReveal);
+  try {
+    const data = await api("/api/rota");
+    rotaData = data.rota;
+    membersData = data.members;
+    renderRota();
+    renderMembers();
+    populateMemberSelect();
+    requestAnimationFrame(setupScrollReveal);
+  } catch (err) {
+    toast("Failed to load data: " + err.message);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -266,9 +269,18 @@ function esc(s) {
 // ASSIGN MODAL
 // ---------------------------------------------------------------------------
 
-function openAssignModal(sessionId) {
+async function openAssignModal(sessionId) {
   const session = rotaData.find((s) => s.id === sessionId);
   if (!session) return;
+
+  // Always refresh members before opening the modal
+  try {
+    const data = await api("/api/rota");
+    membersData = data.members;
+    populateMemberSelect();
+  } catch (e) {
+    // fallback to cached membersData
+  }
 
   document.getElementById("assign-session-id").value = sessionId;
   document.getElementById("modal-date").textContent = fmtDate(session.date) + " — " + weekday(session.date);
