@@ -6,6 +6,10 @@ services:
     buildCommand: npm install
     startCommand: node server.js
     envVars:
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
       - key: SMTP_HOST
         value: smtp.gmail.com
       - key: SMTP_PORT

@@ -2,22 +2,22 @@
  * Bible Study Rota — Backend Server
  *
  * Express server with:
- *  - SQLite persistence (via better-sqlite3)
+ *  - Turso (libsql) cloud database for persistent shared storage
  *  - REST API for rota CRUD, member management, assignments, reminders
  *  - Email reminders via Nodemailer + node-cron
  *
  * SETUP:
- *  1. Copy .env.example to .env and fill in your SMTP/API credentials
- *  2. Run: npm install
- *  3. Run: npm start
- *  4. Open http://localhost:3000
+ *  1. Create a free Turso database at https://turso.tech
+ *  2. Copy .env.example to .env and fill in Turso + SMTP credentials
+ *  3. Run: npm install
+ *  4. Run: npm start
  */
 
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
-const Database = require("better-sqlite3");
+const { createClient } = require("@libsql/client");
 const nodemailer = require("nodemailer");
 const cron = require("node-cron");
 
@@ -26,111 +26,98 @@ const cron = require("node-cron");
 // ---------------------------------------------------------------------------
 
 const PORT = process.env.PORT || 3000;
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, "rota.db");
-
-// Session frequency: "daily" = Mon-Fri every week, or "weekly" on a set day
-const SESSION_DAYS = [1, 2, 3, 4, 5]; // Mon–Fri (JS getDay: 0=Sun)
+const SESSION_DAYS = [1, 2, 3, 4, 5]; // Mon-Fri
 const SESSIONS_TO_GENERATE = parseInt(process.env.SESSIONS_TO_GENERATE, 10) || 20;
-const START_DATE_STR = process.env.START_DATE || "2026-07-14"; // ISO date
+const START_DATE_STR = process.env.START_DATE || "2026-07-14";
 
 // ---------------------------------------------------------------------------
-// 2. DATABASE SETUP
+// 2. DATABASE SETUP (Turso / libsql)
 // ---------------------------------------------------------------------------
 
-const db = new Database(DB_PATH);
-db.pragma("journal_mode = WAL"); // safe concurrent reads
-db.pragma("foreign_keys = ON");
+const db = createClient({
+  url: process.env.TURSO_DATABASE_URL || "file:local.db",
+  authToken: process.env.TURSO_AUTH_TOKEN || undefined,
+});
 
-// Schema
-db.exec(`
-  CREATE TABLE IF NOT EXISTS sessions (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    date        TEXT    NOT NULL UNIQUE,  -- YYYY-MM-DD
-    title       TEXT    DEFAULT 'Bible Study',
-    location    TEXT    DEFAULT '',
-    notes       TEXT    DEFAULT '',
-    created_at  TEXT    DEFAULT (datetime('now'))
-  );
+console.log(`[db] Connected to: ${process.env.TURSO_DATABASE_URL ? "Turso cloud" : "local file"}`);
 
-  CREATE TABLE IF NOT EXISTS members (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT    NOT NULL,
-    email       TEXT    NOT NULL UNIQUE,
-    created_at  TEXT    DEFAULT (datetime('now'))
-  );
+async function initDB() {
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      date        TEXT    NOT NULL UNIQUE,
+      title       TEXT    DEFAULT 'Bible Study',
+      location    TEXT    DEFAULT '',
+      notes       TEXT    DEFAULT '',
+      created_at  TEXT    DEFAULT (datetime('now'))
+    );
 
-  CREATE TABLE IF NOT EXISTS assignments (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  INTEGER NOT NULL UNIQUE,   -- one assignment per session
-    member_id   INTEGER NOT NULL,
-    role        TEXT    DEFAULT 'Leader',  -- Leader / Host / Co-Lead
-    assigned_by TEXT    DEFAULT '',        -- name/email of who made the assignment
-    created_at  TEXT    DEFAULT (datetime('now')),
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (member_id)  REFERENCES members(id)  ON DELETE CASCADE
-  );
+    CREATE TABLE IF NOT EXISTS members (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT    NOT NULL,
+      email       TEXT    NOT NULL UNIQUE,
+      created_at  TEXT    DEFAULT (datetime('now'))
+    );
 
-  CREATE TABLE IF NOT EXISTS reminders (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  INTEGER NOT NULL,
-    member_id   INTEGER NOT NULL,
-    remind_at   TEXT    NOT NULL,  -- ISO 8601 datetime when to fire
-    sent        INTEGER DEFAULT 0,
-    created_at  TEXT    DEFAULT (datetime('now')),
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (member_id)  REFERENCES members(id)  ON DELETE CASCADE
-  );
-`);
+    CREATE TABLE IF NOT EXISTS assignments (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id  INTEGER NOT NULL UNIQUE,
+      member_id   INTEGER NOT NULL,
+      role        TEXT    DEFAULT 'Leader',
+      assigned_by TEXT    DEFAULT '',
+      created_at  TEXT    DEFAULT (datetime('now')),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (member_id)  REFERENCES members(id)  ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS reminders (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id  INTEGER NOT NULL,
+      member_id   INTEGER NOT NULL,
+      remind_at   TEXT    NOT NULL,
+      sent        INTEGER DEFAULT 0,
+      created_at  TEXT    DEFAULT (datetime('now')),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (member_id)  REFERENCES members(id)  ON DELETE CASCADE
+    );
+  `);
+  console.log("[db] Tables created/verified");
+}
 
 // ---------------------------------------------------------------------------
 // 3. SEED SESSIONS (only if table is empty)
 // ---------------------------------------------------------------------------
 
-function seedSessions() {
-  const count = db.prepare("SELECT COUNT(*) as c FROM sessions").get().c;
-  if (count > 0) return;
-
-  const insert = db.prepare(
-    "INSERT OR IGNORE INTO sessions (date, title) VALUES (?, ?)"
-  );
+async function seedSessions() {
+  const result = await db.execute("SELECT COUNT(*) as c FROM sessions");
+  if (result.rows[0].c > 0) return;
 
   const start = new Date(START_DATE_STR + "T00:00:00");
   let inserted = 0;
   let d = new Date(start);
 
+  const stmts = [];
   while (inserted < SESSIONS_TO_GENERATE) {
-    const day = d.getDay(); // 0-6
+    const day = d.getDay();
     if (SESSION_DAYS.includes(day)) {
-      // Use local date parts to avoid UTC timezone shifts
       const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      insert.run(iso, "Bible Study");
+      stmts.push({
+        sql: "INSERT OR IGNORE INTO sessions (date, title) VALUES (?, ?)",
+        args: [iso, "Bible Study"],
+      });
       inserted++;
     }
     d.setDate(d.getDate() + 1);
   }
+
+  // Execute all inserts in a batch
+  await db.batch(stmts);
   console.log(`[seed] Inserted ${inserted} sessions starting ${START_DATE_STR}`);
 }
-
-seedSessions();
 
 // ---------------------------------------------------------------------------
 // 4. EMAIL TRANSPORT
 // ---------------------------------------------------------------------------
-
-// Configure one of: SMTP, SendGrid (via SMTP), Resend, or ethereal for testing
-//
-// Option A – Generic SMTP (Gmail, Outlook, etc.)
-//   Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS in .env
-//
-// Option B – SendGrid
-//   Set SENDGRID_API_KEY in .env; we use their SMTP relay.
-//
-// Option C – Resend
-//   Set RESEND_API_KEY in .env; we use their HTTP API instead of Nodemailer.
-//   For Resend we'll use fetch() — handled separately below.
-//
-// Option D – Ethereal (test/fake SMTP, no real emails)
-//   Set USE_ETHEREAL=true in .env
 
 let transporter = null;
 let useResend = false;
@@ -150,12 +137,10 @@ async function initTransporter() {
       secure: false,
       auth: { user: testAccount.user, pass: testAccount.pass },
     });
-    console.log("[email] Using Ethereal test SMTP — emails will NOT be delivered");
-    console.log(`[email] Ethereal account: ${testAccount.user}`);
+    console.log("[email] Using Ethereal test SMTP");
     return;
   }
 
-  // Default: SMTP
   transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST || "smtp.gmail.com",
     port: parseInt(process.env.SMTP_PORT, 10) || 587,
@@ -168,13 +153,9 @@ async function initTransporter() {
   console.log(`[email] SMTP configured: ${process.env.SMTP_HOST || "smtp.gmail.com"}`);
 }
 
-/**
- * Send an email (or log it for Ethereal/Resend)
- */
 async function sendEmail(to, subject, htmlBody) {
   if (!to) return;
 
-  // Resend path
   if (useResend) {
     try {
       const resp = await fetch("https://api.resend.com/emails", {
@@ -199,7 +180,6 @@ async function sendEmail(to, subject, htmlBody) {
     return;
   }
 
-  // Nodemailer path (SMTP / Ethereal)
   if (!transporter) {
     console.warn("[email] No transporter configured — skipping email to", to);
     return;
@@ -212,7 +192,6 @@ async function sendEmail(to, subject, htmlBody) {
       html: htmlBody,
     });
     console.log(`[email] Sent to ${to} — messageId: ${info.messageId}`);
-    // If Ethereal, log the preview URL
     if (process.env.USE_ETHEREAL === "true") {
       console.log(`[email] Preview: ${nodemailer.getTestMessageUrl(info)}`);
     }
@@ -244,70 +223,61 @@ function buildReminderEmail(member, session, role) {
         ${session.location ? `<p style="margin:4px 0 0;"><strong>Location:</strong> ${session.location}</p>` : ""}
         ${session.notes ? `<p style="margin:4px 0 0;"><strong>Notes:</strong> ${session.notes}</p>` : ""}
       </div>
-      <p>Thank you for serving! 🙏</p>
+      <p>Thank you for serving!</p>
       <hr style="border:none;border-top:1px solid #ddd;margin:24px 0;" />
       <p style="font-size:12px;color:#999;">Bible Study Rota — automated reminder</p>
     </div>
   `;
 }
 
-/**
- * Cron job: runs every minute, checks for reminders that should fire now.
- * Also cleans up reminders whose sessions no longer have an assignment.
- */
-function startReminderCron() {
-  // Every minute
+async function startReminderCron() {
   cron.schedule("* * * * *", async () => {
-    const now = new Date().toISOString();
+    try {
+      const now = new Date().toISOString();
 
-    // 1. Cancel orphaned reminders (assignment removed)
-    const orphaned = db
-      .prepare(
+      // Cancel orphaned reminders (assignment removed)
+      const orphaned = await db.execute(
         `SELECT r.id FROM reminders r
          LEFT JOIN assignments a ON a.session_id = r.session_id
          WHERE a.id IS NULL AND r.sent = 0`
-      )
-      .all();
+      );
+      if (orphaned.rows.length > 0) {
+        const stmts = orphaned.rows.map((r) => ({
+          sql: "DELETE FROM reminders WHERE id = ?",
+          args: [r.id],
+        }));
+        await db.batch(stmts);
+        console.log(`[cron] Cancelled ${orphaned.rows.length} orphaned reminders`);
+      }
 
-    if (orphaned.length > 0) {
-      const del = db.prepare("DELETE FROM reminders WHERE id = ?");
-      const delMany = db.transaction((rows) => {
-        for (const row of rows) del.run(row.id);
-      });
-      delMany(orphaned);
-      console.log(`[cron] Cancelled ${orphaned.length} orphaned reminders`);
-    }
-
-    // 2. Fire due reminders
-    const due = db
-      .prepare(
-        `SELECT r.id, r.session_id, r.member_id,
+      // Fire due reminders
+      const due = await db.execute({
+        sql: `SELECT r.id, r.session_id, r.member_id,
                 s.date, s.title, s.location, s.notes,
                 m.name, m.email, a.role
          FROM reminders r
          JOIN sessions s   ON s.id = r.session_id
          JOIN members  m   ON m.id = r.member_id
          JOIN assignments a ON a.session_id = r.session_id AND a.member_id = r.member_id
-         WHERE r.sent = 0 AND r.remind_at <= ?`
-      )
-      .all(now);
+         WHERE r.sent = 0 AND r.remind_at <= ?`,
+        args: [now],
+      });
 
-    for (const row of due) {
-      const html = buildReminderEmail(
-        { name: row.name },
-        { date: row.date, location: row.location, notes: row.notes },
-        row.role
-      );
-      await sendEmail(
-        row.email,
-        `Reminder: You're leading Bible Study on ${row.date}`,
-        html
-      );
-      db.prepare("UPDATE reminders SET sent = 1 WHERE id = ?").run(row.id);
-    }
+      for (const row of due.rows) {
+        const html = buildReminderEmail(
+          { name: row.name },
+          { date: row.date, location: row.location, notes: row.notes },
+          row.role
+        );
+        await sendEmail(row.email, `Reminder: You're leading Bible Study on ${row.date}`, html);
+        await db.execute({ sql: "UPDATE reminders SET sent = 1 WHERE id = ?", args: [row.id] });
+      }
 
-    if (due.length > 0) {
-      console.log(`[cron] Sent ${due.length} reminder(s)`);
+      if (due.rows.length > 0) {
+        console.log(`[cron] Sent ${due.rows.length} reminder(s)`);
+      }
+    } catch (err) {
+      console.error("[cron] Error:", err.message);
     }
   });
 
@@ -322,196 +292,176 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Serve static files from public directory
+// Serve static files
 const publicDir = path.join(__dirname, "public");
-console.log(`[static] __dirname: ${__dirname}`);
-console.log(`[static] publicDir: ${publicDir}`);
-
 const fs = require("fs");
 try {
   const files = fs.readdirSync(publicDir);
   console.log(`[static] Files in public/: ${files.join(", ")}`);
 } catch (e) {
-  console.error(`[static] ERROR reading public dir: ${e.message}`);
+  console.error(`[static] ERROR: ${e.message}`);
 }
-
 app.use(express.static(publicDir));
-
-// Fallback: serve index.html for root
 app.get("/", (_req, res) => {
   res.sendFile(path.join(publicDir, "index.html"));
 });
 
 // --- Sessions ---
 
-// GET all sessions (optionally filter by month/year)
-app.get("/api/sessions", (req, res) => {
+app.get("/api/sessions", async (req, res) => {
   const { from, to } = req.query;
-  let rows;
+  let result;
   if (from && to) {
-    rows = db
-      .prepare("SELECT * FROM sessions WHERE date BETWEEN ? AND ? ORDER BY date")
-      .all(from, to);
+    result = await db.execute({
+      sql: "SELECT * FROM sessions WHERE date BETWEEN ? AND ? ORDER BY date",
+      args: [from, to],
+    });
   } else {
-    rows = db.prepare("SELECT * FROM sessions ORDER BY date").all();
+    result = await db.execute("SELECT * FROM sessions ORDER BY date");
   }
-  res.json(rows);
+  res.json(result.rows);
 });
 
-// POST create a session
-app.post("/api/sessions", (req, res) => {
+app.post("/api/sessions", async (req, res) => {
   const { date, title, location, notes } = req.body;
   if (!date) return res.status(400).json({ error: "date is required (YYYY-MM-DD)" });
   try {
-    const info = db
-      .prepare("INSERT INTO sessions (date, title, location, notes) VALUES (?, ?, ?, ?)")
-      .run(date, title || "Bible Study", location || "", notes || "");
-    res.json({ id: info.lastInsertRowid, date, title: title || "Bible Study" });
+    const result = await db.execute({
+      sql: "INSERT INTO sessions (date, title, location, notes) VALUES (?, ?, ?, ?)",
+      args: [date, title || "Bible Study", location || "", notes || ""],
+    });
+    res.json({ id: Number(result.lastInsertRowid), date, title: title || "Bible Study" });
   } catch (e) {
-    if (e.message.includes("UNIQUE")) {
+    if (e.message && e.message.includes("UNIQUE")) {
       return res.status(409).json({ error: "A session already exists on that date" });
     }
     res.status(500).json({ error: e.message });
   }
 });
 
-// PUT update a session
-app.put("/api/sessions/:id", (req, res) => {
+app.put("/api/sessions/:id", async (req, res) => {
   const { title, location, notes, date } = req.body;
-  const stmt = db.prepare(
-    "UPDATE sessions SET title = COALESCE(?, title), location = COALESCE(?, location), notes = COALESCE(?, notes), date = COALESCE(?, date) WHERE id = ?"
-  );
-  stmt.run(title || null, location || null, notes || null, date || null, req.params.id);
+  await db.execute({
+    sql: `UPDATE sessions SET
+      title = COALESCE(?, title),
+      location = COALESCE(?, location),
+      notes = COALESCE(?, notes),
+      date = COALESCE(?, date)
+      WHERE id = ?`,
+    args: [title || null, location || null, notes || null, date || null, req.params.id],
+  });
   res.json({ ok: true });
 });
 
-// DELETE a session
-app.delete("/api/sessions/:id", (req, res) => {
-  db.prepare("DELETE FROM sessions WHERE id = ?").run(req.params.id);
+app.delete("/api/sessions/:id", async (req, res) => {
+  await db.execute({ sql: "DELETE FROM sessions WHERE id = ?", args: [req.params.id] });
   res.json({ ok: true });
 });
 
 // --- Members ---
 
-// GET all members
-app.get("/api/members", (_req, res) => {
-  res.json(db.prepare("SELECT * FROM members ORDER BY name").all());
+app.get("/api/members", async (_req, res) => {
+  const result = await db.execute("SELECT * FROM members ORDER BY name");
+  res.json(result.rows);
 });
 
-// POST create a member
-app.post("/api/members", (req, res) => {
+app.post("/api/members", async (req, res) => {
   const { name, email } = req.body;
   if (!name || !email) return res.status(400).json({ error: "name and email required" });
   try {
-    const info = db
-      .prepare("INSERT INTO members (name, email) VALUES (?, ?)")
-      .run(name.trim(), email.trim().toLowerCase());
-    console.log(`[members] Created: id=${info.lastInsertRowid} name=${name} email=${email}`);
-    const all = db.prepare("SELECT * FROM members").all();
-    console.log(`[members] Total members in DB: ${all.length}`);
-    res.json({ id: info.lastInsertRowid, name: name.trim(), email: email.trim().toLowerCase() });
+    const result = await db.execute({
+      sql: "INSERT INTO members (name, email) VALUES (?, ?)",
+      args: [name.trim(), email.trim().toLowerCase()],
+    });
+    console.log(`[members] Created: id=${result.lastInsertRowid} name=${name} email=${email}`);
+    res.json({ id: Number(result.lastInsertRowid), name: name.trim(), email: email.trim().toLowerCase() });
   } catch (e) {
-    console.error(`[members] Error creating member:`, e.message);
-    if (e.message.includes("UNIQUE")) {
+    console.error(`[members] Error:`, e.message);
+    if (e.message && e.message.includes("UNIQUE")) {
       return res.status(409).json({ error: "A member with that email already exists" });
     }
     res.status(500).json({ error: e.message });
   }
 });
 
-// DELETE a member
-app.delete("/api/members/:id", (req, res) => {
-  db.prepare("DELETE FROM members WHERE id = ?").run(req.params.id);
+app.delete("/api/members/:id", async (req, res) => {
+  await db.execute({ sql: "DELETE FROM members WHERE id = ?", args: [req.params.id] });
   res.json({ ok: true });
 });
 
 // --- Assignments ---
 
-// GET all assignments (joined with session + member info)
-app.get("/api/assignments", (_req, res) => {
-  const rows = db
-    .prepare(
-      `SELECT a.id, a.session_id, a.member_id, a.role, a.assigned_by, a.created_at,
-              s.date, s.title, s.location,
-              m.name AS member_name, m.email AS member_email
-       FROM assignments a
-       JOIN sessions s ON s.id = a.session_id
-       JOIN members  m ON m.id = a.member_id
-       ORDER BY s.date`
-    )
-    .all();
-  res.json(rows);
+app.get("/api/assignments", async (_req, res) => {
+  const result = await db.execute(
+    `SELECT a.id, a.session_id, a.member_id, a.role, a.assigned_by, a.created_at,
+            s.date, s.title, s.location,
+            m.name AS member_name, m.email AS member_email
+     FROM assignments a
+     JOIN sessions s ON s.id = a.session_id
+     JOIN members  m ON m.id = a.member_id
+     ORDER BY s.date`
+  );
+  res.json(result.rows);
 });
 
-// POST create or replace an assignment for a session
-app.post("/api/assignments", (req, res) => {
+app.post("/api/assignments", async (req, res) => {
   const { session_id, member_id, role, assigned_by } = req.body;
   if (!session_id || !member_id) {
     return res.status(400).json({ error: "session_id and member_id required" });
   }
 
-  const assign = db.transaction(() => {
-    // Remove existing assignment for this session (replace)
-    db.prepare("DELETE FROM assignments WHERE session_id = ?").run(session_id);
-    // Also remove any pending reminders for this session
-    db.prepare("DELETE FROM reminders WHERE session_id = ? AND sent = 0").run(session_id);
+  try {
+    // Remove existing assignment + pending reminders for this session
+    await db.execute({ sql: "DELETE FROM assignments WHERE session_id = ?", args: [session_id] });
+    await db.execute({ sql: "DELETE FROM reminders WHERE session_id = ? AND sent = 0", args: [session_id] });
 
-    const info = db
-      .prepare(
-        "INSERT INTO assignments (session_id, member_id, role, assigned_by) VALUES (?, ?, ?, ?)"
-      )
-      .run(session_id, member_id, role || "Leader", assigned_by || "");
+    const result = await db.execute({
+      sql: "INSERT INTO assignments (session_id, member_id, role, assigned_by) VALUES (?, ?, ?, ?)",
+      args: [session_id, member_id, role || "Leader", assigned_by || ""],
+    });
 
-    // Auto-create a 1-day-before reminder
-    const session = db.prepare("SELECT date FROM sessions WHERE id = ?").get(session_id);
-    if (session) {
-      // Session date at 09:00 local, minus 1 day = reminder time
-      const sessionDateTime = new Date(session.date + "T09:00:00");
-      const remindAt = new Date(sessionDateTime.getTime() - 1440 * 60000); // 1440 min = 1 day
-      db.prepare(
-        "INSERT INTO reminders (session_id, member_id, remind_at) VALUES (?, ?, ?)"
-      ).run(session_id, member_id, remindAt.toISOString());
+    // Auto-create 1-day-before reminder
+    const session = await db.execute({ sql: "SELECT date FROM sessions WHERE id = ?", args: [session_id] });
+    if (session.rows.length > 0) {
+      const sessionDateTime = new Date(session.rows[0].date + "T09:00:00");
+      const remindAt = new Date(sessionDateTime.getTime() - 1440 * 60000);
+      await db.execute({
+        sql: "INSERT INTO reminders (session_id, member_id, remind_at) VALUES (?, ?, ?)",
+        args: [session_id, member_id, remindAt.toISOString()],
+      });
     }
 
-    return info.lastInsertRowid;
-  });
-
-  const id = assign();
-  res.json({ id, session_id, member_id, reminder: "1 day before" });
+    res.json({ id: Number(result.lastInsertRowid), session_id, member_id, reminder: "1 day before" });
+  } catch (err) {
+    console.error("[assignments] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// DELETE an assignment
-app.delete("/api/assignments/:id", (req, res) => {
-  // Also cancel pending reminders for this session
-  const assignment = db.prepare("SELECT session_id FROM assignments WHERE id = ?").get(req.params.id);
-  if (assignment) {
-    db.prepare("DELETE FROM reminders WHERE session_id = ? AND sent = 0").run(assignment.session_id);
+app.delete("/api/assignments/:id", async (req, res) => {
+  const assignment = await db.execute({ sql: "SELECT session_id FROM assignments WHERE id = ?", args: [req.params.id] });
+  if (assignment.rows.length > 0) {
+    await db.execute({ sql: "DELETE FROM reminders WHERE session_id = ? AND sent = 0", args: [assignment.rows[0].session_id] });
   }
-  db.prepare("DELETE FROM assignments WHERE id = ?").run(req.params.id);
+  await db.execute({ sql: "DELETE FROM assignments WHERE id = ?", args: [req.params.id] });
   res.json({ ok: true });
 });
 
 // --- Reminders ---
 
-// GET all reminders (with joined info)
-app.get("/api/reminders", (_req, res) => {
-  const rows = db
-    .prepare(
-      `SELECT r.*, s.date, m.name AS member_name, m.email AS member_email, a.role
-       FROM reminders r
-       JOIN sessions s ON s.id = r.session_id
-       JOIN members  m ON m.id = r.member_id
-       JOIN assignments a ON a.session_id = r.session_id AND a.member_id = r.member_id
-       ORDER BY r.remind_at`
-    )
-    .all();
-  res.json(rows);
+app.get("/api/reminders", async (_req, res) => {
+  const result = await db.execute(
+    `SELECT r.*, s.date, m.name AS member_name, m.email AS member_email, a.role
+     FROM reminders r
+     JOIN sessions s ON s.id = r.session_id
+     JOIN members  m ON m.id = r.member_id
+     JOIN assignments a ON a.session_id = r.session_id AND a.member_id = r.member_id
+     ORDER BY r.remind_at`
+  );
+  res.json(result.rows);
 });
 
-// POST create a reminder for an assignment
-// Body: { session_id, member_id, offset_minutes } — how many minutes before session date to remind
-// Or: { session_id, member_id, remind_at } — exact ISO datetime
-app.post("/api/reminders", (req, res) => {
+app.post("/api/reminders", async (req, res) => {
   const { session_id, member_id, offset_minutes, remind_at } = req.body;
   if (!session_id || !member_id) {
     return res.status(400).json({ error: "session_id and member_id required" });
@@ -521,66 +471,57 @@ app.post("/api/reminders", (req, res) => {
   if (remind_at) {
     fireAt = remind_at;
   } else if (offset_minutes != null) {
-    // Calculate from session date (at 09:00 as default session start)
-    const session = db.prepare("SELECT date FROM sessions WHERE id = ?").get(session_id);
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    const sessionDateTime = new Date(session.date + "T09:00:00");
+    const session = await db.execute({ sql: "SELECT date FROM sessions WHERE id = ?", args: [session_id] });
+    if (session.rows.length === 0) return res.status(404).json({ error: "Session not found" });
+    const sessionDateTime = new Date(session.rows[0].date + "T09:00:00");
     fireAt = new Date(sessionDateTime.getTime() - offset_minutes * 60000).toISOString();
   } else {
     return res.status(400).json({ error: "Provide offset_minutes or remind_at" });
   }
 
-  // Don't create reminders in the past
   if (new Date(fireAt) < new Date()) {
     return res.status(400).json({ error: "Reminder time is in the past" });
   }
 
-  // Check assignment exists
-  const assignment = db
-    .prepare("SELECT id FROM assignments WHERE session_id = ? AND member_id = ?")
-    .get(session_id, member_id);
-  if (!assignment) {
+  const assignment = await db.execute({
+    sql: "SELECT id FROM assignments WHERE session_id = ? AND member_id = ?",
+    args: [session_id, member_id],
+  });
+  if (assignment.rows.length === 0) {
     return res.status(404).json({ error: "No assignment found for this session/member" });
   }
 
-  const info = db
-    .prepare("INSERT INTO reminders (session_id, member_id, remind_at) VALUES (?, ?, ?)")
-    .run(session_id, member_id, fireAt);
+  const result = await db.execute({
+    sql: "INSERT INTO reminders (session_id, member_id, remind_at) VALUES (?, ?, ?)",
+    args: [session_id, member_id, fireAt],
+  });
 
-  res.json({ id: info.lastInsertRowid, remind_at: fireAt });
+  res.json({ id: Number(result.lastInsertRowid), remind_at: fireAt });
 });
 
-// DELETE a reminder
-app.delete("/api/reminders/:id", (req, res) => {
-  db.prepare("DELETE FROM reminders WHERE id = ?").run(req.params.id);
+app.delete("/api/reminders/:id", async (req, res) => {
+  await db.execute({ sql: "DELETE FROM reminders WHERE id = ?", args: [req.params.id] });
   res.json({ ok: true });
 });
 
-// --- Dashboard data (single endpoint for the frontend) ---
-app.get("/api/rota", (_req, res) => {
-  const sessions = db.prepare("SELECT * FROM sessions ORDER BY date").all();
-  const assignments = db
-    .prepare(
-      `SELECT a.*, m.name AS member_name, m.email AS member_email
-       FROM assignments a
-       JOIN members m ON m.id = a.member_id`
-    )
-    .all();
-  const reminders = db
-    .prepare(
-      `SELECT r.*, m.name AS member_name
-       FROM reminders r
-       JOIN members m ON m.id = r.member_id`
-    )
-    .all();
-  const members = db.prepare("SELECT * FROM members ORDER BY name").all();
-  console.log(`[rota] sessions=${sessions.length} members=${members.length} assignments=${assignments.length}`);
+// --- Dashboard data ---
 
-  // Merge assignments into sessions
+app.get("/api/rota", async (_req, res) => {
+  const sessions = (await db.execute("SELECT * FROM sessions ORDER BY date")).rows;
+  const assignments = (await db.execute(
+    `SELECT a.*, m.name AS member_name, m.email AS member_email
+     FROM assignments a
+     JOIN members m ON m.id = a.member_id`
+  )).rows;
+  const reminders = (await db.execute(
+    `SELECT r.*, m.name AS member_name
+     FROM reminders r
+     JOIN members m ON m.id = r.member_id`
+  )).rows;
+  const members = (await db.execute("SELECT * FROM members ORDER BY name")).rows;
+
   const assignmentMap = {};
-  assignments.forEach((a) => {
-    assignmentMap[a.session_id] = a;
-  });
+  assignments.forEach((a) => { assignmentMap[a.session_id] = a; });
   const reminderMap = {};
   reminders.forEach((r) => {
     if (!reminderMap[r.session_id]) reminderMap[r.session_id] = [];
@@ -596,21 +537,13 @@ app.get("/api/rota", (_req, res) => {
   res.json({ rota, members });
 });
 
-// --- Debug endpoint ---
-app.get("/api/debug", (_req, res) => {
-  const sessions = db.prepare("SELECT COUNT(*) as c FROM sessions").get().c;
-  const members = db.prepare("SELECT * FROM members").all();
-  const assignments = db.prepare("SELECT * FROM assignments").all();
-  const reminders = db.prepare("SELECT * FROM reminders").all();
-  res.json({
-    dbPath: DB_PATH,
-    sessions,
-    members,
-    assignments,
-    reminders,
-    uptime: process.uptime(),
-    memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
-  });
+// --- Debug ---
+
+app.get("/api/debug", async (_req, res) => {
+  const sessions = (await db.execute("SELECT COUNT(*) as c FROM sessions")).rows[0].c;
+  const members = (await db.execute("SELECT * FROM members")).rows;
+  const assignments = (await db.execute("SELECT * FROM assignments")).rows;
+  res.json({ sessions, members, assignments, dbUrl: process.env.TURSO_DATABASE_URL ? "turso" : "local" });
 });
 
 // ---------------------------------------------------------------------------
@@ -618,6 +551,8 @@ app.get("/api/debug", (_req, res) => {
 // ---------------------------------------------------------------------------
 
 async function start() {
+  await initDB();
+  await seedSessions();
   await initTransporter();
   startReminderCron();
 
