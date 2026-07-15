@@ -188,7 +188,7 @@ function renderRota() {
     if (s.assignment) {
       const a = s.assignment;
       html += `<div class="assigned">`;
-      html += `<span class="assigned-badge"><span class="role-dot"></span>${a.member_name} — ${a.role}</span>`;
+      html += `<span class="assigned-badge"><span class="role-dot"></span>${a.member_name} — ${a.role}${a.recurring ? '<span class="badge-recurring">↻ recurring</span>' : ''}</span>`;
       html += `</div>`;
       // Show reminders
       if (s.reminders && s.reminders.length > 0) {
@@ -288,6 +288,8 @@ async function openAssignModal(sessionId) {
   document.getElementById("assign-role").value = session.assignment ? session.assignment.role : "Leader";
   document.getElementById("assign-by").value = "";
   document.getElementById("assign-reminder").value = "";
+  document.getElementById("assign-recurring").checked = session.assignment && session.assignment.recurring;
+  document.getElementById("assign-weekday-label").textContent = weekday(session.date);
 
   document.getElementById("assign-modal").classList.remove("hidden");
 }
@@ -309,14 +311,15 @@ document.getElementById("assign-form").addEventListener("submit", async (e) => {
   const role = document.getElementById("assign-role").value;
   const assignedBy = document.getElementById("assign-by").value.trim();
   const reminderOffset = document.getElementById("assign-reminder").value;
+  const recurring = document.getElementById("assign-recurring").checked;
 
   if (!memberId) return toast("Please select a member");
 
   try {
     // Create or replace assignment
-    await api("/api/assignments", {
+    const result = await api("/api/assignments", {
       method: "POST",
-      body: { session_id: sessionId, member_id: memberId, role, assigned_by: assignedBy },
+      body: { session_id: sessionId, member_id: memberId, role, assigned_by: assignedBy, recurring },
     });
 
     // Set reminder if requested
@@ -332,7 +335,8 @@ document.getElementById("assign-form").addEventListener("submit", async (e) => {
     }
 
     document.getElementById("assign-modal").classList.add("hidden");
-    toast("Assignment saved!");
+    const count = result && result.assigned_count ? result.assigned_count : 1;
+    toast(recurring ? `Recurring assignment saved to ${count} sessions!` : "Assignment saved!");
     await loadRota();
   } catch (err) {
     toast("Error: " + err.message);

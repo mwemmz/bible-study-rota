@@ -65,6 +65,7 @@ async function initDB() {
       member_id   INTEGER NOT NULL,
       role        TEXT    DEFAULT 'Leader',
       assigned_by TEXT    DEFAULT '',
+      recurring   INTEGER DEFAULT 0,
       created_at  TEXT    DEFAULT (datetime('now')),
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
       FOREIGN KEY (member_id)  REFERENCES members(id)  ON DELETE CASCADE
@@ -81,6 +82,10 @@ async function initDB() {
       FOREIGN KEY (member_id)  REFERENCES members(id)  ON DELETE CASCADE
     );
   `);
+  // Migration: add recurring column to existing databases
+  try {
+    await db.execute("ALTER TABLE assignments ADD COLUMN recurring INTEGER DEFAULT 0");
+  } catch (e) { /* column already exists */ }
   console.log("[db] Tables created/verified");
 }
 
@@ -330,7 +335,39 @@ app.post("/api/sessions", async (req, res) => {
       sql: "INSERT INTO sessions (date, title, location, notes) VALUES (?, ?, ?, ?)",
       args: [date, title || "Bible Study", location || "", notes || ""],
     });
-    res.json({ id: Number(result.lastInsertRowid), date, title: title || "Bible Study" });
+
+    const newSessionId = Number(result.lastInsertRowid);
+    const newDate = new Date(date + "T00:00:00");
+    const weekday = newDate.getDay();
+
+    // Auto-assign any recurring pattern for this weekday
+    const recurringAssignments = (await db.execute({
+      sql: `SELECT DISTINCT a.member_id, a.role, a.assigned_by
+       FROM assignments a
+       JOIN sessions s ON s.id = a.session_id
+       WHERE a.recurring = 1 AND a.session_id != ?
+         AND strftime('%w', s.date) = ?
+         AND s.date < ?`,
+      args: [newSessionId, String(weekday), date],
+    })).rows;
+
+    if (recurringAssignments.length > 0) {
+      const ra = recurringAssignments[0]; // Take the most recent recurring pattern
+      await db.execute({
+        sql: "INSERT INTO assignments (session_id, member_id, role, assigned_by, recurring) VALUES (?, ?, ?, ?, 1)",
+        args: [newSessionId, ra.member_id, ra.role, ra.assigned_by || ""],
+      });
+      // Auto-create reminder
+      const sessionDateTime = new Date(date + "T09:00:00");
+      const remindAt = new Date(sessionDateTime.getTime() - 1440 * 60000);
+      await db.execute({
+        sql: "INSERT INTO reminders (session_id, member_id, remind_at) VALUES (?, ?, ?)",
+        args: [newSessionId, ra.member_id, remindAt.toISOString()],
+      });
+      console.log(`[sessions] Auto-assigned recurring member ${ra.member_id} to new session ${newSessionId}`);
+    }
+
+    res.json({ id: newSessionId, date, title: title || "Bible Study" });
   } catch (e) {
     if (e.message && e.message.includes("UNIQUE")) {
       return res.status(409).json({ error: "A session already exists on that date" });
@@ -393,7 +430,7 @@ app.delete("/api/members/:id", async (req, res) => {
 
 app.get("/api/assignments", async (_req, res) => {
   const result = await db.execute(
-    `SELECT a.id, a.session_id, a.member_id, a.role, a.assigned_by, a.created_at,
+    `SELECT a.id, a.session_id, a.member_id, a.role, a.assigned_by, a.recurring, a.created_at,
             s.date, s.title, s.location,
             m.name AS member_name, m.email AS member_email
      FROM assignments a
@@ -405,33 +442,73 @@ app.get("/api/assignments", async (_req, res) => {
 });
 
 app.post("/api/assignments", async (req, res) => {
-  const { session_id, member_id, role, assigned_by } = req.body;
+  const { session_id, member_id, role, assigned_by, recurring } = req.body;
   if (!session_id || !member_id) {
     return res.status(400).json({ error: "session_id and member_id required" });
   }
 
   try {
-    // Remove existing assignment + pending reminders for this session
-    await db.execute({ sql: "DELETE FROM assignments WHERE session_id = ?", args: [session_id] });
-    await db.execute({ sql: "DELETE FROM reminders WHERE session_id = ? AND sent = 0", args: [session_id] });
+    // Get the selected session's date
+    const sessionResult = await db.execute({ sql: "SELECT date FROM sessions WHERE id = ?", args: [session_id] });
+    if (sessionResult.rows.length === 0) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+    const sessionDate = new Date(sessionResult.rows[0].date + "T00:00:00");
+    const weekday = sessionDate.getDay(); // 0=Sun, 1=Mon, ...
 
-    const result = await db.execute({
-      sql: "INSERT INTO assignments (session_id, member_id, role, assigned_by) VALUES (?, ?, ?, ?)",
-      args: [session_id, member_id, role || "Leader", assigned_by || ""],
+    // Find all future sessions on the same day of the week
+    const allSessions = (await db.execute("SELECT id, date FROM sessions ORDER BY date")).rows;
+    const targetSessions = allSessions.filter((s) => {
+      const d = new Date(s.date + "T00:00:00");
+      return d.getDay() === weekday && d >= sessionDate;
     });
 
-    // Auto-create 1-day-before reminder
-    const session = await db.execute({ sql: "SELECT date FROM sessions WHERE id = ?", args: [session_id] });
-    if (session.rows.length > 0) {
-      const sessionDateTime = new Date(session.rows[0].date + "T09:00:00");
-      const remindAt = new Date(sessionDateTime.getTime() - 1440 * 60000);
-      await db.execute({
-        sql: "INSERT INTO reminders (session_id, member_id, remind_at) VALUES (?, ?, ?)",
-        args: [session_id, member_id, remindAt.toISOString()],
-      });
+    // If not recurring, only assign to the selected session
+    const sessionsToAssign = recurring ? targetSessions : [allSessions.find((s) => s.id === session_id)].filter(Boolean);
+
+    const stmts = [];
+    let assignedCount = 0;
+
+    for (const s of sessionsToAssign) {
+      // Remove existing assignment for this session
+      stmts.push({ sql: "DELETE FROM assignments WHERE session_id = ?", args: [s.id] });
+      stmts.push({ sql: "DELETE FROM reminders WHERE session_id = ? AND sent = 0", args: [s.id] });
     }
 
-    res.json({ id: Number(result.lastInsertRowid), session_id, member_id, reminder: "1 day before" });
+    await db.batch(stmts);
+
+    const assignStmts = [];
+    const reminderStmts = [];
+
+    for (const s of sessionsToAssign) {
+      assignStmts.push({
+        sql: "INSERT INTO assignments (session_id, member_id, role, assigned_by, recurring) VALUES (?, ?, ?, ?, ?)",
+        args: [s.id, member_id, role || "Leader", assigned_by || "", recurring ? 1 : 0],
+      });
+
+      // Auto-create 1-day-before reminder
+      const sDate = new Date(s.date + "T09:00:00");
+      const remindAt = new Date(sDate.getTime() - 1440 * 60000);
+      reminderStmts.push({
+        sql: "INSERT INTO reminders (session_id, member_id, remind_at) VALUES (?, ?, ?)",
+        args: [s.id, member_id, remindAt.toISOString()],
+      });
+
+      assignedCount++;
+    }
+
+    await db.batch(assignStmts);
+    await db.batch(reminderStmts);
+
+    console.log(`[assignments] Assigned member ${member_id} to ${assignedCount} session(s) (recurring: ${!!recurring})`);
+
+    res.json({
+      session_id,
+      member_id,
+      recurring: !!recurring,
+      assigned_count: assignedCount,
+      reminder: "1 day before",
+    });
   } catch (err) {
     console.error("[assignments] Error:", err.message);
     res.status(500).json({ error: err.message });

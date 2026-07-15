@@ -522,6 +522,48 @@ header .subtitle {
   width: 100%;
 }
 
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  background: rgba(126, 207, 138, 0.06);
+  border: 1px solid rgba(126, 207, 138, 0.18);
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.checkbox-row:hover {
+  background: rgba(126, 207, 138, 0.12);
+  border-color: rgba(126, 207, 138, 0.3);
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.badge-recurring {
+  display: inline-block;
+  font-size: 0.6rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 7px;
+  border-radius: 20px;
+  background: rgba(126, 207, 138, 0.15);
+  color: var(--accent);
+  border: 1px solid rgba(126, 207, 138, 0.25);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
 /* --- Members Tab --- */
 
 .member-form {
