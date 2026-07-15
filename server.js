@@ -321,7 +321,16 @@ function startReminderCron() {
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+
+// Serve static files from public directory
+const publicDir = path.join(__dirname, "public");
+console.log(`[static] Serving files from: ${publicDir}`);
+app.use(express.static(publicDir));
+
+// Fallback: serve index.html for root
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(publicDir, "index.html"));
+});
 
 // --- Sessions ---
 
