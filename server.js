@@ -209,7 +209,7 @@ async function sendEmail(to, subject, htmlBody) {
 // 5. CRON — CHECK & SEND REMINDERS
 // ---------------------------------------------------------------------------
 
-function buildReminderEmail(member, session, role) {
+function buildReminderEmail(member, session, role, remindAt) {
   const dateObj = new Date(session.date + "T00:00:00");
   const niceDate = dateObj.toLocaleDateString("en-GB", {
     weekday: "long",
@@ -218,11 +218,18 @@ function buildReminderEmail(member, session, role) {
     day: "numeric",
   });
 
+  const sessionDate = new Date(session.date + "T08:00:00");
+  const isEvening = new Date(remindAt).getHours() >= 18;
+  const greeting = isEvening
+    ? "Tomorrow is your Bible study session!"
+    : "Good morning! Today is your Bible study session.";
+
   return `
     <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px;">
       <h2 style="color:#4a6741;">Bible Study Reminder</h2>
       <p>Hi <strong>${member.name}</strong>,</p>
-      <p>This is a friendly reminder that you are assigned as <strong>${role}</strong> for the upcoming Bible study session:</p>
+      <p>${greeting}</p>
+      <p>You are assigned as <strong>${role}</strong> for the upcoming session:</p>
       <div style="background:#f4f8f2;border-left:4px solid #4a6741;padding:16px;margin:16px 0;border-radius:4px;">
         <p style="margin:0;"><strong>Date:</strong> ${niceDate}</p>
         ${session.location ? `<p style="margin:4px 0 0;"><strong>Location:</strong> ${session.location}</p>` : ""}
@@ -257,7 +264,7 @@ async function startReminderCron() {
 
       // Fire due reminders
       const due = await db.execute({
-        sql: `SELECT r.id, r.session_id, r.member_id,
+        sql: `SELECT r.id, r.session_id, r.member_id, r.remind_at,
                 s.date, s.title, s.location, s.notes,
                 m.name, m.email, a.role
          FROM reminders r
@@ -272,7 +279,8 @@ async function startReminderCron() {
         const html = buildReminderEmail(
           { name: row.name },
           { date: row.date, location: row.location, notes: row.notes },
-          row.role
+          row.role,
+          row.remind_at
         );
         await sendEmail(row.email, `Reminder: You're leading Bible Study on ${row.date}`, html);
         await db.execute({ sql: "UPDATE reminders SET sent = 1 WHERE id = ?", args: [row.id] });
@@ -357,12 +365,16 @@ app.post("/api/sessions", async (req, res) => {
         sql: "INSERT INTO assignments (session_id, member_id, role, assigned_by, recurring) VALUES (?, ?, ?, ?, 1)",
         args: [newSessionId, ra.member_id, ra.role, ra.assigned_by || ""],
       });
-      // Auto-create reminder
-      const sessionDateTime = new Date(date + "T09:00:00");
-      const remindAt = new Date(sessionDateTime.getTime() - 1440 * 60000);
+      // Auto-create two reminders: evening before (20:00) and morning of (08:00)
+      const sessionDateTime = new Date(date + "T08:00:00");
+      const eveningBefore = new Date(sessionDateTime.getTime() - 12 * 3600000);
       await db.execute({
         sql: "INSERT INTO reminders (session_id, member_id, remind_at) VALUES (?, ?, ?)",
-        args: [newSessionId, ra.member_id, remindAt.toISOString()],
+        args: [newSessionId, ra.member_id, eveningBefore.toISOString()],
+      });
+      await db.execute({
+        sql: "INSERT INTO reminders (session_id, member_id, remind_at) VALUES (?, ?, ?)",
+        args: [newSessionId, ra.member_id, sessionDateTime.toISOString()],
       });
       console.log(`[sessions] Auto-assigned recurring member ${ra.member_id} to new session ${newSessionId}`);
     }
@@ -486,12 +498,16 @@ app.post("/api/assignments", async (req, res) => {
         args: [s.id, member_id, role || "Leader", assigned_by || "", recurring ? 1 : 0],
       });
 
-      // Auto-create 1-day-before reminder
-      const sDate = new Date(s.date + "T09:00:00");
-      const remindAt = new Date(sDate.getTime() - 1440 * 60000);
+      // Auto-create two reminders: evening before (20:00) and morning of (08:00)
+      const sDate = new Date(s.date + "T08:00:00");
+      const eveningBefore = new Date(sDate.getTime() - 12 * 3600000); // 20:00 day before
       reminderStmts.push({
         sql: "INSERT INTO reminders (session_id, member_id, remind_at) VALUES (?, ?, ?)",
-        args: [s.id, member_id, remindAt.toISOString()],
+        args: [s.id, member_id, eveningBefore.toISOString()],
+      });
+      reminderStmts.push({
+        sql: "INSERT INTO reminders (session_id, member_id, remind_at) VALUES (?, ?, ?)",
+        args: [s.id, member_id, sDate.toISOString()],
       });
 
       assignedCount++;
@@ -507,7 +523,7 @@ app.post("/api/assignments", async (req, res) => {
       member_id,
       recurring: !!recurring,
       assigned_count: assignedCount,
-      reminder: "1 day before",
+      reminder: "Evening before (20:00) + Morning of (08:00)",
     });
   } catch (err) {
     console.error("[assignments] Error:", err.message);

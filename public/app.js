@@ -194,8 +194,10 @@ function renderRota() {
       if (s.reminders && s.reminders.length > 0) {
         for (const r of s.reminders) {
           const fireDate = new Date(r.remind_at);
+          const hour = fireDate.getHours();
+          const label = hour >= 18 ? "Evening before" : "Morning of";
           const niceTime = fireDate.toLocaleString("en-GB", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-          html += `<div class="reminder-badge">🔔 Reminder: ${niceTime}${r.sent ? " (sent)" : ""}</div>`;
+          html += `<div class="reminder-badge">🔔 ${label}: ${niceTime}${r.sent ? " (sent)" : ""}</div>`;
         }
       }
     } else {
