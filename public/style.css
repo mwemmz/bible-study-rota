@@ -247,7 +247,7 @@ header .subtitle {
   padding: 10px 14px;
   border: 1px solid var(--border-glass);
   border-radius: var(--r-sm);
-  background: var(--bg-glass);
+  background: rgba(255, 255, 255, 0.06);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   color: var(--text-primary);
@@ -257,10 +257,17 @@ header .subtitle {
   cursor: pointer;
   transition: border-color var(--duration-fast) var(--ease-out-expo);
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg width='12' height='8' viewBox='0 0 12 8' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' stroke='rgba(255,255,255,0.4)' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  color-scheme: dark;
+  background-image: url("data:image/svg+xml,%3Csvg width='12' height='8' viewBox='0 0 12 8' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' stroke='rgba(255,255,255,0.5)' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 14px center;
   padding-right: 36px;
+}
+
+.filter-bar select option {
+  background: #1a1a24;
+  color: #f0f0f2;
+  padding: 8px 12px;
 }
 
 .filter-bar select:hover,
@@ -692,10 +699,28 @@ textarea {
   font-family: inherit;
   font-size: 0.82rem;
   font-weight: 500;
-  background: rgba(255,255,255,0.04);
+  background: rgba(255,255,255,0.06);
   color: var(--text-primary);
   transition: all var(--duration-fast) var(--ease-out-expo);
   -webkit-appearance: none;
+  color-scheme: dark;
+}
+
+select option {
+  background: #1a1a24;
+  color: #f0f0f2;
+  padding: 8px 12px;
+}
+
+select option:checked {
+  background: rgba(126, 207, 138, 0.2);
+  color: #ffffff;
+}
+
+select option:hover,
+select option:focus {
+  background: rgba(126, 207, 138, 0.15);
+  color: #ffffff;
 }
 
 input::placeholder,
