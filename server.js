@@ -387,8 +387,12 @@ app.post("/api/members", (req, res) => {
     const info = db
       .prepare("INSERT INTO members (name, email) VALUES (?, ?)")
       .run(name.trim(), email.trim().toLowerCase());
+    console.log(`[members] Created: id=${info.lastInsertRowid} name=${name} email=${email}`);
+    const all = db.prepare("SELECT * FROM members").all();
+    console.log(`[members] Total members in DB: ${all.length}`);
     res.json({ id: info.lastInsertRowid, name: name.trim(), email: email.trim().toLowerCase() });
   } catch (e) {
+    console.error(`[members] Error creating member:`, e.message);
     if (e.message.includes("UNIQUE")) {
       return res.status(409).json({ error: "A member with that email already exists" });
     }
@@ -551,6 +555,7 @@ app.get("/api/rota", (_req, res) => {
     )
     .all();
   const members = db.prepare("SELECT * FROM members ORDER BY name").all();
+  console.log(`[rota] sessions=${sessions.length} members=${members.length} assignments=${assignments.length}`);
 
   // Merge assignments into sessions
   const assignmentMap = {};
@@ -570,6 +575,23 @@ app.get("/api/rota", (_req, res) => {
   }));
 
   res.json({ rota, members });
+});
+
+// --- Debug endpoint ---
+app.get("/api/debug", (_req, res) => {
+  const sessions = db.prepare("SELECT COUNT(*) as c FROM sessions").get().c;
+  const members = db.prepare("SELECT * FROM members").all();
+  const assignments = db.prepare("SELECT * FROM assignments").all();
+  const reminders = db.prepare("SELECT * FROM reminders").all();
+  res.json({
+    dbPath: DB_PATH,
+    sessions,
+    members,
+    assignments,
+    reminders,
+    uptime: process.uptime(),
+    memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+  });
 });
 
 // ---------------------------------------------------------------------------
