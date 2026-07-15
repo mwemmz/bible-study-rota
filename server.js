@@ -324,7 +324,17 @@ app.use(express.json());
 
 // Serve static files from public directory
 const publicDir = path.join(__dirname, "public");
-console.log(`[static] Serving files from: ${publicDir}`);
+console.log(`[static] __dirname: ${__dirname}`);
+console.log(`[static] publicDir: ${publicDir}`);
+
+const fs = require("fs");
+try {
+  const files = fs.readdirSync(publicDir);
+  console.log(`[static] Files in public/: ${files.join(", ")}`);
+} catch (e) {
+  console.error(`[static] ERROR reading public dir: ${e.message}`);
+}
+
 app.use(express.static(publicDir));
 
 // Fallback: serve index.html for root
