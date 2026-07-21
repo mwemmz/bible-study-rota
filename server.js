@@ -26,9 +26,7 @@ const cron = require("node-cron");
 // ---------------------------------------------------------------------------
 
 const PORT = process.env.PORT || 3000;
-const SESSION_DAYS = [1, 2, 3, 4, 5]; // Mon-Fri
-const SESSIONS_TO_GENERATE = parseInt(process.env.SESSIONS_TO_GENERATE, 10) || 20;
-const START_DATE_STR = process.env.START_DATE || "2026-07-14";
+const SESSION_DAYS = [1, 2, 3, 4, 5]; // Mon–Fri
 
 // ---------------------------------------------------------------------------
 // 2. DATABASE SETUP (Turso / libsql)
@@ -90,34 +88,59 @@ async function initDB() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. SEED SESSIONS (only if table is empty)
+// 3. AUTO-GENERATE ROLLING 3-WEEK SESSIONS
 // ---------------------------------------------------------------------------
 
-async function seedSessions() {
-  const result = await db.execute("SELECT COUNT(*) as c FROM sessions");
-  if (result.rows[0].c > 0) return;
+function getMonday(d) {
+  const date = new Date(d);
+  const day = date.getDay();
+  const diff = date.getDate() - day + (day === 0 ? -6 : 1);
+  date.setDate(diff);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
 
-  const start = new Date(START_DATE_STR + "T00:00:00");
-  let inserted = 0;
-  let d = new Date(start);
+function formatDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 
+async function generateRollingSessions() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const thisMonday = getMonday(today);
+  const prevMonday = new Date(thisMonday);
+  prevMonday.setDate(prevMonday.getDate() - 7);
+  const nextMonday = new Date(thisMonday);
+  nextMonday.setDate(nextMonday.getDate() + 7);
+
+  const weeks = [prevMonday, thisMonday, nextMonday];
   const stmts = [];
-  while (inserted < SESSIONS_TO_GENERATE) {
-    const day = d.getDay();
-    if (SESSION_DAYS.includes(day)) {
-      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+  for (const monday of weeks) {
+    for (let i = 0; i < 5; i++) {
+      const d = new Date(monday);
+      d.setDate(d.getDate() + i);
+      const iso = formatDate(d);
       stmts.push({
         sql: "INSERT OR IGNORE INTO sessions (date, title) VALUES (?, ?)",
         args: [iso, "Bible Study"],
       });
-      inserted++;
     }
-    d.setDate(d.getDate() + 1);
   }
 
-  // Execute all inserts in a batch
   await db.batch(stmts);
-  console.log(`[seed] Inserted ${inserted} sessions starting ${START_DATE_STR}`);
+  console.log("[seed] Rolling 3-week sessions ensured (prev/current/next week)");
+
+  // Clean up sessions older than previous week
+  const cutoff = formatDate(prevMonday);
+  const deleted = await db.execute({
+    sql: "DELETE FROM sessions WHERE date < ?",
+    args: [cutoff],
+  });
+  if (deleted.rowsAffected > 0) {
+    console.log(`[seed] Cleaned up ${deleted.rowsAffected} old session(s) before ${cutoff}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +318,17 @@ async function startReminderCron() {
   });
 
   console.log("[cron] Reminder checker scheduled (every minute)");
+
+  // Regenerate rolling 3-week sessions daily at midnight
+  cron.schedule("0 0 * * *", async () => {
+    try {
+      await generateRollingSessions();
+      console.log("[cron] Daily session regeneration complete");
+    } catch (err) {
+      console.error("[cron] Session regeneration error:", err.message);
+    }
+  });
+  console.log("[cron] Daily session regeneration scheduled (00:00)");
 }
 
 // ---------------------------------------------------------------------------
@@ -645,7 +679,7 @@ app.get("/api/debug", async (_req, res) => {
 
 async function start() {
   await initDB();
-  await seedSessions();
+  await generateRollingSessions();
   await initTransporter();
   startReminderCron();
 
